@@ -1,0 +1,215 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="cn.iocoder.yudao.module.studyroom.dal.mysql.seatOrder.SeatOrderMapper">
+
+    <resultMap id="StudyLeaderboardDOResultMap" type="cn.iocoder.yudao.module.studyroom.dal.dataobject.leaderboard.StudyLeaderboardDO">
+        <result property="userId" column="userId"/>
+        <result property="userName" column="userName"/>
+        <result property="avatar" column="avatar"/>
+        <result property="studyMinutes" column="studyMinutes"/>
+        <result property="finishedOrderCount" column="finishedOrderCount"/>
+    </resultMap>
+
+    <!-- 乐观锁更新支付状态 -->
+    <update id="updateByIdAndPayStatus">
+        UPDATE sr_order
+        SET pay_status = #{updateObj.payStatus},
+            status = #{updateObj.status},
+            pay_time = #{updateObj.payTime},
+            pay_channel_code = #{updateObj.payChannelCode},
+            update_time = NOW()
+        WHERE id = #{id}
+          AND pay_status = #{expectStatus}
+          AND deleted = 0
+    </update>
+
+    <!-- 查询指定时间段内，当前门店中已经被占用的座位ID -->
+    <select id="selectReservedSeatIds" resultType="java.lang.Long">
+        SELECT DISTINCT seat_id
+        FROM sr_order
+        WHERE room_id = #{roomId}
+          AND status IN (10, 20)
+          AND deleted = 0
+          AND start_time <![CDATA[ < ]]> #{endTime}
+          AND end_time <![CDATA[ > ]]> #{startTime}
+    </select>
+
+    <!-- 查询某个具体座位在某个时间段内是否冲突 -->
+    <select id="selectConflictCount" resultType="java.lang.Long">
+        SELECT COUNT(1)
+        FROM sr_order
+        WHERE room_id = #{roomId}
+          AND seat_id = #{seatId}
+          AND status IN (10, 20)
+          AND deleted = 0
+          AND start_time <![CDATA[ < ]]> #{endTime}
+          AND end_time <![CDATA[ > ]]> #{startTime}
+    </select>
+
+    <!-- 已支付 -> 使用中 -->
+    <update id="updatePaidToUsing">
+        UPDATE sr_order
+        SET status = 20,
+            update_time = NOW()
+        WHERE deleted = 0
+          AND pay_status = 1
+          AND status = 10
+          AND start_time <![CDATA[ <= ]]> #{now}
+          AND end_time <![CDATA[ > ]]> #{now}
+    </update>
+
+    <!-- 使用中 -> 已完成 -->
+    <update id="updateUsingToFinished">
+        UPDATE sr_order
+        SET status = 30,
+            update_time = NOW()
+        WHERE deleted = 0
+          AND pay_status = 1
+          AND status = 20
+          AND end_time <![CDATA[ <= ]]> #{now}
+    </update>
+
+    <!-- 已支付 -> 已完成（容错） -->
+    <update id="updatePaidToFinishedDirectly">
+        UPDATE sr_order
+        SET status = 30,
+            update_time = NOW()
+        WHERE deleted = 0
+          AND pay_status = 1
+          AND status = 10
+          AND end_time <![CDATA[ <= ]]> #{now}
+    </update>
+
+    <!-- 指定时间范围排行榜（只统计已完成订单） -->
+    <select id="selectStudyLeaderboard" resultMap="StudyLeaderboardDOResultMap">
+        SELECT
+            o.user_id AS userId,
+            MAX(o.user_name) AS userName,
+            MAX(u.avatar) AS avatar,
+            SUM(
+                    TIMESTAMPDIFF(
+                        MINUTE,
+                            GREATEST(o.start_time, #{startTime}),
+                            LEAST(o.end_time, #{endTime})
+                    )
+            ) AS studyMinutes,
+            COUNT(1) AS finishedOrderCount
+        FROM sr_order o
+                 LEFT JOIN member_user u ON u.id = o.user_id
+        WHERE o.deleted = 0
+          AND o.status = 30
+          AND o.end_time <![CDATA[ > ]]> #{startTime}
+          AND o.start_time <![CDATA[ < ]]> #{endTime}
+        GROUP BY o.user_id
+        HAVING studyMinutes <![CDATA[ > ]]> 0
+        ORDER BY studyMinutes DESC, o.user_id ASC
+            LIMIT #{limit}
+    </select>
+
+    <!-- 总榜（只统计已完成订单） -->
+    <select id="selectStudyLeaderboardAll" resultMap="StudyLeaderboardDOResultMap">
+        SELECT
+            o.user_id AS userId,
+            MAX(o.user_name) AS userName,
+            MAX(u.avatar) AS avatar,
+            SUM(TIMESTAMPDIFF(MINUTE, o.start_time, o.end_time)) AS studyMinutes,
+            COUNT(1) AS finishedOrderCount
+        FROM sr_order o
+                 LEFT JOIN member_user u ON u.id = o.user_id
+        WHERE o.deleted = 0
+          AND o.status = 30
+        GROUP BY o.user_id
+        HAVING studyMinutes <![CDATA[ > ]]> 0
+        ORDER BY studyMinutes DESC, o.user_id ASC
+            LIMIT #{limit}
+    </select>
+
+    <!-- 查询当前用户指定周期学习分钟数 -->
+    <select id="selectUserStudyMinutes" resultType="java.lang.Long">
+        SELECT COALESCE(
+                       SUM(
+                               TIMESTAMPDIFF(
+                                   MINUTE,
+                                       GREATEST(start_time, #{startTime}),
+                                       LEAST(end_time, #{endTime})
+                               )
+                       ), 0
+               )
+        FROM sr_order
+        WHERE deleted = 0
+          AND status = 30
+          AND user_id = #{userId}
+          AND end_time <![CDATA[ > ]]> #{startTime}
+          AND start_time <![CDATA[ < ]]> #{endTime}
+    </select>
+
+    <!-- 查询当前用户总榜分钟数 -->
+    <select id="selectUserStudyMinutesAll" resultType="java.lang.Long">
+        SELECT COALESCE(SUM(TIMESTAMPDIFF(MINUTE, start_time, end_time)), 0)
+        FROM sr_order
+        WHERE deleted = 0
+          AND status = 30
+          AND user_id = #{userId}
+    </select>
+
+    <!-- 查询当前用户指定周期完成次数 -->
+    <select id="selectUserFinishedOrderCount" resultType="java.lang.Long">
+        SELECT COUNT(1)
+        FROM sr_order
+        WHERE deleted = 0
+          AND status = 30
+          AND user_id = #{userId}
+          AND end_time <![CDATA[ > ]]> #{startTime}
+          AND start_time <![CDATA[ < ]]> #{endTime}
+    </select>
+
+    <!-- 查询当前用户总榜完成次数 -->
+    <select id="selectUserFinishedOrderCountAll" resultType="java.lang.Long">
+        SELECT COUNT(1)
+        FROM sr_order
+        WHERE deleted = 0
+          AND status = 30
+          AND user_id = #{userId}
+    </select>
+
+    <!-- 指定周期用户排名 -->
+    <select id="selectUserRank" resultType="java.lang.Integer">
+        SELECT COUNT(1) + 1
+        FROM (
+                 SELECT user_id,
+                        SUM(
+                                TIMESTAMPDIFF(
+                                    MINUTE,
+                                        GREATEST(start_time, #{startTime}),
+                                        LEAST(end_time, #{endTime})
+                                )
+                        ) AS studyMinutes
+                 FROM sr_order
+                 WHERE deleted = 0
+                   AND status = 30
+                   AND end_time <![CDATA[ > ]]> #{startTime}
+                   AND start_time <![CDATA[ < ]]> #{endTime}
+                 GROUP BY user_id
+                 HAVING studyMinutes <![CDATA[ > ]]> #{myMinutes}
+                     OR (studyMinutes = #{myMinutes} AND user_id <![CDATA[ < ]]> #{userId})
+             ) t
+    </select>
+
+    <!-- 总榜用户排名 -->
+    <select id="selectUserRankAll" resultType="java.lang.Integer">
+        SELECT COUNT(1) + 1
+        FROM (
+                 SELECT user_id,
+                        SUM(TIMESTAMPDIFF(MINUTE, start_time, end_time)) AS studyMinutes
+                 FROM sr_order
+                 WHERE deleted = 0
+                   AND status = 30
+                 GROUP BY user_id
+                 HAVING studyMinutes <![CDATA[ > ]]> #{myMinutes}
+                     OR (studyMinutes = #{myMinutes} AND user_id <![CDATA[ < ]]> #{userId})
+             ) t
+    </select>
+
+</mapper>
